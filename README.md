@@ -96,6 +96,11 @@ Waffen am unteren Rand ihres Bandes gleichen das über Reichweite, Durchschlag o
 Flächenschaden aus — die Railgun etwa trifft mit unendlichem Durchschlag eine ganze
 Reihe, die Singularität zieht Gegner zusammen.
 
+Neben den prozentualen Wert-Upgrades gibt es **Talente**, die das Kampfgefühl ändern
+statt nur Zahlen zu erhöhen: Kettenreaktion (Gegner explodieren beim Tod), Dornenpanzer,
+Frostaura, Adrenalin bei wenig Leben, Blutrausch pro Kill, Splittergeschosse, eine
+regelmäßige Druckwelle und eine Zweite Chance pro Welle.
+
 Die Gegner werden über die Wellen hinweg mehr statt nur zäher: die Lebenspunkte
 wachsen flacher als früher, dafür steigen Anzahl, Typenvielfalt und Elite-Anteil.
 Eine Welle dauert dadurch quer durch den Lauf etwa 10–35 Sekunden.

@@ -188,6 +188,30 @@ const UPGRADES = [
 ];
 function upgradeCost(u, level){ return Math.round(u.base * Math.pow(u.growth, level)); }
 
+/* Talente verändern das Spiel, statt nur Zahlen zu schieben. Sie liegen im
+   selben Speicher wie die Wert-Upgrades (run.upgrades), nutzen aber eigene
+   Schlüssel und werden von computeStats bewusst nicht angefasst. */
+const TALENTS = [
+  { key:"chainReaction", name:"Kettenreaktion", icon:"💥", max:3, base:70,  growth:2.1,
+    desc:"Getötete Gegner explodieren und reißen Umstehende mit." },
+  { key:"thorns",        name:"Dornenpanzer",   icon:"🌵", max:3, base:55,  growth:2.0,
+    desc:"Nahkämpfer nehmen einen Teil ihres eigenen Schadens." },
+  { key:"frostAura",     name:"Frostaura",      icon:"❄️", max:2, base:85,  growth:2.2,
+    desc:"Gegner in deiner Nähe werden dauerhaft verlangsamt." },
+  { key:"adrenaline",    name:"Adrenalin",      icon:"🔺", max:3, base:65,  growth:2.0,
+    desc:"Unter 40% Leben: deutlich mehr Tempo und Feuerrate." },
+  { key:"frenzy",        name:"Blutrausch",     icon:"🩸", max:3, base:75,  growth:2.0,
+    desc:"Jeder Kill steigert 4s lang deine Feuerrate, bis zu fünffach." },
+  { key:"splinter",      name:"Splittergeschoss", icon:"✴️", max:2, base:95, growth:2.2,
+    desc:"Jeder Treffer schleudert Splitter in die Umgebung." },
+  { key:"pulse",         name:"Druckwelle",     icon:"🌀", max:2, base:115, growth:2.2,
+    desc:"Alle paar Sekunden entlädt sich eine Schockwelle um dich." },
+  { key:"secondChance",  name:"Zweite Chance",  icon:"💗", max:1, base:190, growth:1,
+    desc:"Einmal pro Welle überlebst du einen tödlichen Treffer." },
+];
+function talentCost(t, level){ return Math.round(t.base * Math.pow(t.growth, level)); }
+function tal(key){ return (run && run.upgrades[key]) || 0; }
+
 /* =========================================================
    2. HILFSFUNKTIONEN
 ========================================================= */
@@ -966,9 +990,23 @@ let player = null;
 let zombies = [], bullets = [], ebullets = [], coinDrops = [], particles = [], floaters = [];
 let booms = [], shocks = [], warns = [], pools = [], vortexes = [], pets = [], portals = [];
 let shake = 0, hitFlash = 0, flashWhite = 0, hitStop = 0;
+let frenzy = 0, frenzyT = 0, chainDepth = 0, secondChanceUsed = false;
+
+/* Blutrausch und Adrenalin wirken auf Werte, die sich im Lauf ändern, und
+   lassen sich deshalb nicht in computeStats vorberechnen. */
+function frenzyMul(){
+  const lvl = tal("frenzy");
+  return (!lvl || frenzyT <= 0) ? 1 : 1 + 0.06 * lvl * frenzy;
+}
+function adrenalineMul(){
+  const lvl = tal("adrenaline");
+  if (!lvl || !player || !S || player.hp > S.maxHp * 0.4) return 1;
+  return 1 + 0.12 * lvl;
+}
 
 function resetEntities(){
-  player = { x: WORLD_W/2, y: WORLD_H/2, r: 8, hp: run.hp, invuln:0, walkT:0, faceX:1, faceY:0, flash:0, dead:false, dustT:0 };
+  player = { x: WORLD_W/2, y: WORLD_H/2, r: 8, hp: run.hp, invuln:0, walkT:0, faceX:1, faceY:0,
+             flash:0, dead:false, dustT:0, pulseT:6 };
   zombies = []; bullets = []; ebullets = []; coinDrops = []; particles = []; floaters = [];
   booms = []; shocks = []; warns = []; pools = []; vortexes = []; pets = []; portals = [];
   cam.x = camTargetX(); cam.y = camTargetY();
@@ -1132,6 +1170,8 @@ function startWave(n){
   wave.spawned = 0; wave.spawnTimer = 0.6;
   wave.bossSpawned = !wave.isBoss;
   wave.bossIndex = Math.floor((n/5 - 1)) % BOSSES.length;
+  secondChanceUsed = false;
+  frenzy = 0; frenzyT = 0;
   phase = "wave";
   zombies = []; bullets = []; ebullets = []; particles = []; booms = [];
   shocks = []; warns = []; pools = []; vortexes = []; portals = [];
@@ -1255,11 +1295,15 @@ function updateWeapons(dt){
     const def = DEF(it.defId);
     if (!def || !def.weapon) continue;
     const w = def.weapon;
-    it.timer = (it.timer || 0) - dt;
-    it.cdMax = 1 / (w.rate * S.fireRateMul);
+    it.cdMax = 1 / (w.rate * S.fireRateMul * frenzyMul() * adrenalineMul());
+    it.timer = Math.max(0, (it.timer || 0) - dt);
     if (it.timer > 0) continue;
-    if (fireWeapon(it, def)) it.timer = it.cdMax;
-    else it.timer = 0.08;
+    // Ohne Ziel bleibt der Nachladebalken voll — nur die Zielsuche pausiert kurz.
+    // Sonst sprang die Anzeige zwischen "fast fertig" und "leer" hin und her.
+    it.scanT = (it.scanT || 0) - dt;
+    if (it.scanT > 0) continue;
+    if (fireWeapon(it, def)){ it.timer = it.cdMax; it.scanT = 0; }
+    else it.scanT = 0.08;
   }
 }
 
@@ -1316,11 +1360,15 @@ function chainLightning(fromZ, dmg, cfg, hitSet){
 }
 let arcs = [];
 
-function explode(x, y, radius, damage, color){
+function explode(x, y, radius, damage, color, quiet){
   booms.push({ x, y, r:4, maxR:radius, life:0.36, maxLife:0.36, color: color || "#ffb03a" });
-  shake = Math.max(shake, 5);
-  flashWhite = Math.max(flashWhite, 0.12);
-  SFX.explode();
+  if (quiet){
+    tone({ f:180, to:70, d:0.09, type:"square", v:0.035 });
+  } else {
+    shake = Math.max(shake, 5);
+    flashWhite = Math.max(flashWhite, 0.12);
+    SFX.explode();
+  }
   for (const z of zombies){
     if (dist2(x,y,z.x,z.y) <= radius*radius) damageZombie(z, damage, false, x, y);
   }
@@ -1392,6 +1440,14 @@ function killZombie(z){
     coinDrops.push({ x:z.x, y:z.y, val:per, vx:rand(-45,45), vy:rand(-45,45), settle:0.32, t:Math.random()*6 });
   }
   gainXp(Math.max(1, Math.round(z.xpVal * S.xpMul)));
+
+  if (tal("frenzy")){ frenzy = Math.min(5, frenzy + 1); frenzyT = 4; }
+  const cr = tal("chainReaction");
+  if (cr && !isBoss && chainDepth < 2){
+    chainDepth++;
+    explode(z.x, z.y, 24 + 9*cr, z.maxHp * 0.22 * cr, "#ffd166", true);
+    chainDepth--;
+  }
 }
 
 function updateBullets(dt){
@@ -1427,6 +1483,14 @@ function updateBullets(dt){
           b.hit.add(z);
           impactFx(b.x, b.y, b.bc);
           damageZombie(z, b.dmg, b.crit, b.px, b.py);
+          const spl = tal("splinter");
+          if (spl && b.owner === "player" && !b.shard){
+            for (let k=0;k<2*spl;k++){
+              spawnBullet(b.x, b.y, rand(0,Math.PI*2),
+                { speed:210, range:52, pierce:0, bw:3, bh:3, bc:b.bc }, b.dmg*0.4, false, 0, "player");
+              bullets[bullets.length-1].shard = true;
+            }
+          }
           if (b.fx){
             applyFx(z, b.fx, b.px, b.py);
             if (b.fx.explode) explode(b.x, b.y, b.fx.explode.radius, b.fx.explode.damage * S.damageMul, b.bc);
@@ -1506,12 +1570,12 @@ function updateAreas(dt){
    11. KAMPF – Gegner
 ========================================================= */
 function hurtPlayer(amount, srcX, srcY, knock){
-  if (player.invuln > 0 || player.hp <= 0) return;
+  if (player.invuln > 0 || player.hp <= 0) return 0;
   if (Math.random() < S.dodge){
     player.invuln = 0.4;
     floaters.push({ x:player.x, y:player.y-14, vy:-24, life:0.6, maxLife:0.6, text:"AUSWEICH", color:"#7fd7ff", big:false });
     SFX.dodge();
-    return;
+    return 0;
   }
   const taken = Math.max(1, Math.round(amount * (1 - S.armorRed)));
   player.hp -= taken;
@@ -1531,6 +1595,16 @@ function hurtPlayer(amount, srcX, srcY, knock){
     player.x = clamp(player.x + (player.x-srcX)/d*knock, player.r, WORLD_W-player.r);
     player.y = clamp(player.y + (player.y-srcY)/d*knock, player.r, WORLD_H-player.r);
   }
+  if (player.hp <= 0 && tal("secondChance") && !secondChanceUsed){
+    secondChanceUsed = true;
+    player.hp = Math.max(1, Math.round(S.maxHp * 0.35));
+    player.invuln = 2.2;
+    flashWhite = Math.max(flashWhite, 0.35);
+    shake = Math.max(shake, 8);
+    showAlert("ZWEITE CHANCE");
+    SFX.levelUp();
+  }
+  return taken;
 }
 function enemyExplode(x, y, radius, dmg){
   booms.push({ x, y, r:4, maxR:radius, life:0.4, maxLife:0.4, color:"#ff6a2a" });
@@ -1706,6 +1780,11 @@ function updateZombies(dt){
     const d = Math.hypot(dx,dy) || 1;
     dx/=d; dy/=d;
     const aimX = dx, aimY = dy;
+    const fa = tal("frostAura");
+    if (fa && d < 44 + 12*fa){
+      z.slowT = Math.max(z.slowT, 0.25);
+      z.slowAmt = Math.max(z.slowAmt || 0, 0.22 * fa);
+    }
 
     // Fernkämpfer / Beschwörer halten Abstand
     const keep = z.ranged ? z.ranged.keep : (z.spawner ? z.spawner.keep : (z.keep || 0));
@@ -1756,7 +1835,11 @@ function updateZombies(dt){
         killZombie(z);
         continue;
       }
-      if (player.invuln <= 0) hurtPlayer(z.dmg, z.x, z.y, 8);
+      if (player.invuln <= 0){
+        const taken = hurtPlayer(z.dmg, z.x, z.y, 8);
+        const th = tal("thorns");
+        if (th && taken > 0) damageZombie(z, taken * 0.3 * th, false, player.x, player.y);
+      }
     }
   }
 }
@@ -1862,6 +1945,7 @@ function updateEffects(dt){
       vx: rand(-6,6), vy: rand(-14,-4), life: rand(1.2,2.4), maxLife:2.4,
       color: pick(["#5a5040","#6b5f4a","#3f3a30"]), size:1 });
   }
+  if (frenzyT > 0){ frenzyT -= dt; if (frenzyT <= 0) frenzy = 0; }
   if (shake > 0) shake = Math.max(0, shake - dt*24);
   if (hitFlash > 0) hitFlash -= dt;
   if (flashWhite > 0) flashWhite -= dt*1.6;
@@ -1872,7 +1956,7 @@ function updatePlayer(dt){
   const ix = kb.x || input.x, iy = kb.y || input.y;
   const mag = Math.hypot(ix,iy);
   if (mag > 0.001){
-    const sp = S.moveSpeed * Math.min(1, mag);
+    const sp = S.moveSpeed * adrenalineMul() * Math.min(1, mag);
     player.x += (ix/mag)*sp*dt;
     player.y += (iy/mag)*sp*dt;
     player.walkT += dt * 9 * Math.min(1,mag);
@@ -1890,15 +1974,24 @@ function updatePlayer(dt){
   if (player.invuln > 0) player.invuln -= dt;
   if (player.flash > 0) player.flash -= dt;
   if (S.regen > 0 && player.hp > 0 && player.hp < S.maxHp) player.hp = Math.min(S.maxHp, player.hp + S.regen*dt);
+
+  const pl = tal("pulse");
+  if (pl){
+    player.pulseT -= dt;
+    if (player.pulseT <= 0){
+      player.pulseT = 9 - pl;
+      // Schaden an der Wellenstärke ausgerichtet, damit die Druckwelle spät nicht verpufft
+      explode(player.x, player.y, 58 + 18*pl, waveConfig(run.wave).hpBase * 0.32 * pl, "#9fd4ff");
+    }
+  }
 }
 
+/* Die Kamera hängt fest an der Figur statt weich nachzuziehen. Beim Nachziehen
+   runden Figur und Kamera unabhängig voneinander auf das Pixelraster, wodurch die
+   Figur gegen den Hintergrund zittert. Fest gekoppelt ist der Versatz konstant. */
 function updateCamera(dt){
-  const tx = camTargetX(), ty = camTargetY();
-  const k = Math.min(1, dt*7);
-  cam.x += (tx - cam.x)*k;
-  cam.y += (ty - cam.y)*k;
-  cam.x = clamp(cam.x, 0, WORLD_W - VIEW_W);
-  cam.y = clamp(cam.y, 0, WORLD_H - VIEW_H);
+  cam.x = clamp(camTargetX(), 0, WORLD_W - VIEW_W);
+  cam.y = clamp(camTargetY(), 0, WORLD_H - VIEW_H);
 }
 
 /* =========================================================
@@ -1947,11 +2040,14 @@ function frame(t){
 /* =========================================================
    14. RENDERING
 ========================================================= */
+/* Auf ganze Gerätepixel runden, nicht auf ganze Weltpixel: bei SS=2 ist das
+   die feinste Stufe, die noch scharf bleibt, und halbiert das Ruckeln. */
+function snap(v){ return Math.round(v*SS)/SS; }
 function drawSprite(set, frameIdx, x, y, flip, white, scale, alpha){
   const spr = (white ? set.w : set.f)[frameIdx];
   const s = scale || 1;
   const w = spr.width*s, h = spr.height*s;
-  const dx = Math.round(x - w/2), dy = Math.round(y - h*0.72);
+  const dx = snap(x - w/2), dy = snap(y - h*0.72);
   if (alpha != null) ctx.globalAlpha = alpha;
   if (flip){
     ctx.save();
@@ -1976,7 +2072,7 @@ function shadow(x, y, r, a){
 }
 /* Vier-Phasen-Laufzyklus aus zwei Einzelbildern: das Auf und Ab zwischen den
    Bildern macht die Bewegung flüssiger, ohne zusätzliche Pixelarbeit. */
-function walkBob(t){ return [0, -0.6, 0, 0.4][Math.floor(t*2) % 4]; }
+function walkBob(t){ return [0, -0.5, 0, 0.25][Math.floor(t*2) % 4]; }
 
 const PLAYER_SCALE = 1.4;
 function drawPlayer(){
@@ -2212,7 +2308,7 @@ function drawEffects(){
 
 const DBG = { ground:1, decal:1, groundFx:1, coins:1, entities:1, bullets:1, effects:1 };
 function draw(){
-  const cx = Math.round(cam.x), cy = Math.round(cam.y);
+  const cx = snap(cam.x), cy = snap(cam.y);
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,VIEW_W*SS,VIEW_H*SS);
 
@@ -2648,26 +2744,64 @@ function statSummaryHTML(){
   return rows.map(r => `<div class="statRow"><span>${r[0]}</span><span>${r[1]}</span></div>`).join("");
 }
 
+function pipsHTML(lvl, max){
+  return Array.from({length: max}, (_,k)=>`<div class="pip ${k<lvl?"on":""}"></div>`).join("");
+}
 function renderUpgrades(){
   const wrap = el("tab-upgrades");
-  wrap.innerHTML = UPGRADES.map((u, i) => {
+
+  const talents = TALENTS.map((t, i) => {
+    const lvl = tal(t.key);
+    const maxed = lvl >= t.max;
+    const cost = maxed ? 0 : talentCost(t, lvl);
+    return `
+      <div class="upRow talent ${lvl?"owned":""}">
+        <div class="cIcon">${t.icon}</div>
+        <div class="upInfo">
+          <div class="upName">${t.name}${lvl?` <span class="lvlBadge">${lvl}/${t.max}</span>`:""}</div>
+          <div class="upDesc">${t.desc}</div>
+          <div class="upPips">${pipsHTML(lvl, t.max)}</div>
+        </div>
+        <button class="actBtn ${maxed?"":"take"}" data-tal="${i}" ${(maxed || run.coins < cost)?"disabled":""}>${maxed?"MAX":("🪙 "+cost)}</button>
+      </div>`;
+  }).join("");
+
+  const stats = UPGRADES.map((u, i) => {
     const lvl = run.upgrades[u.key] || 0;
     const maxed = u.max != null && lvl >= u.max;
     const cost = maxed ? 0 : upgradeCost(u, lvl);
     const cur = u.special ? `aktuell +${lvl}` : `aktuell +${fmtNum(u.per*lvl,1)}${u.unit}`;
-    const pips = Array.from({length: u.max != null ? u.max : 8},
-      (_,k)=>`<div class="pip ${k<lvl?"on":""}"></div>`).join("");
     return `
       <div class="upRow">
         <div class="cIcon">${u.icon}</div>
         <div class="upInfo">
           <div class="upName">${u.name}</div>
           <div class="upDesc">+${fmtNum(u.per,1)}${u.unit} pro Stufe · ${cur}</div>
-          <div class="upPips">${pips}</div>
+          <div class="upPips">${pipsHTML(lvl, u.max != null ? u.max : 8)}</div>
         </div>
         <button class="actBtn" data-up="${i}" ${(maxed || run.coins < cost)?"disabled":""}>${maxed?"MAX":("🪙 "+cost)}</button>
       </div>`;
   }).join("");
+
+  wrap.innerHTML =
+    `<div class="sectionTitle">TALENTE — verändern, wie du kämpfst</div>` + talents +
+    `<div class="sectionTitle">WERTE — verstärken, was du hast</div>` + stats;
+
+  wrap.querySelectorAll("button[data-tal]").forEach(btn => {
+    btn.addEventListener("click", ()=>{
+      const t = TALENTS[parseInt(btn.dataset.tal,10)];
+      const lvl = tal(t.key);
+      if (lvl >= t.max) return;
+      const cost = talentCost(t, lvl);
+      if (run.coins < cost) return;
+      run.coins -= cost;
+      run.upgrades[t.key] = lvl + 1;
+      refreshStats();
+      SFX.buy();
+      saveGame();
+      renderShop();
+    });
+  });
   wrap.querySelectorAll("button[data-up]").forEach(btn => {
     btn.addEventListener("click", ()=>{
       const u = UPGRADES[parseInt(btn.dataset.up,10)];
@@ -2688,6 +2822,8 @@ function renderUpgrades(){
 
 function renderShop(){
   el("shopWaveDone").textContent = run.wave;
+  const talentReady = TALENTS.some(t => tal(t.key) < t.max && run.coins >= talentCost(t, tal(t.key)));
+  el("upDot").classList.toggle("hidden", !talentReady);
   el("shopCoinText").textContent = run.coins;
   renderOffers();
   renderFuse();
@@ -2868,7 +3004,7 @@ function initMenu(){
 }
 function drawIdle(){
   cam.x = WORLD_W/2 - VIEW_W/2; cam.y = WORLD_H/2 - VIEW_H/2;
-  const cx = Math.round(cam.x), cy = Math.round(cam.y);
+  const cx = snap(cam.x), cy = snap(cam.y);
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,VIEW_W*SS,VIEW_H*SS);
   ctx.setTransform(SS,0,0,SS, Math.round(-cx*SS), Math.round(-cy*SS));

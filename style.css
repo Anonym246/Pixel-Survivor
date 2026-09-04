@@ -316,3 +316,6 @@ canvas#world{
 .fuseRow{ background:var(--panel-2); border:1px solid var(--line); border-radius:12px; padding:9px; }
 .fuseHead{ display:flex; gap:7px; align-items:center; font-size:12px; font-weight:800; margin-bottom:7px; }
 .fuseHead .to{ color:var(--gold); margin-left:auto; }
+.upRow.talent{ background:linear-gradient(100deg,rgba(78,224,138,.06),var(--panel-2) 60%); }
+.upRow.talent.owned{ border-color:rgba(78,224,138,.32); }
+.upRow.talent .upDesc{ color:#9fb0c6; }
